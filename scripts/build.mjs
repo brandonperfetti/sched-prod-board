@@ -1,5 +1,5 @@
 // Builds dist/ from app/: stamps the git sha (R6) and writes config.js from BOARD_API and BOARD_SESSION.
-// Refuses a dirty tree, so the sha on the page is always the commit that built it.
+// Writes to BUILD_OUT (default dist/). Refuses a dirty tree, so the sha on the page is always the commit that built it.
 import { execFileSync } from 'node:child_process';
 import { cpSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
@@ -15,12 +15,13 @@ if (!BOARD_API || !BOARD_SESSION) {
   process.exit(1);
 }
 
-rmSync('dist', { recursive: true, force: true });
-cpSync('app', 'dist', { recursive: true });
-const html = readFileSync('dist/index.html', 'utf8').replaceAll('__BUILD_SHA__', sha);
-writeFileSync('dist/index.html', html);
+const out = process.env.BUILD_OUT ?? 'dist';
+rmSync(out, { recursive: true, force: true });
+cpSync('app', out, { recursive: true });
+const html = readFileSync(`${out}/index.html`, 'utf8').replaceAll('__BUILD_SHA__', sha);
+writeFileSync(`${out}/index.html`, html);
 writeFileSync(
-  'dist/config.js',
+  `${out}/config.js`,
   `export const API = ${JSON.stringify(BOARD_API)};\nexport const SESSION = ${JSON.stringify(BOARD_SESSION)};\n`,
 );
-console.log(`build: dist/ at ${sha}`);
+console.log(`build: ${out}/ at ${sha}`);

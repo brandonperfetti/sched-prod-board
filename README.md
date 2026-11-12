@@ -6,8 +6,10 @@ course's incident API. Read `plan.md` first, then the four ready issues in `issu
 ## Run it
 
 1. Fill `app/config.js` with `api` and `session` from start-challenge.
-2. Serve `app/` with any static server: `npm run serve`.
-3. Deploy `app/` to your own public **https** address — any static host works (GitHub Pages, Cloudflare
+2. Build: `BOARD_API=<api> BOARD_SESSION=<session> npm run build` writes `dist/` with the git sha stamped in
+   (R6) and `config.js` filled. It refuses a dirty tree, so the sha always names the commit.
+3. Serve `dist/` locally: `npm run serve`. Test: `npm test` (builds against a mocked API).
+4. Deploy `dist/` to your own public **https** address — any static host works (GitHub Pages, Cloudflare
    Pages or Workers, Netlify, Vercel's production URL, …).
 
 ## The incident API

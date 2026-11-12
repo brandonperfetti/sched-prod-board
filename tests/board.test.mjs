@@ -1,5 +1,5 @@
 // Board tests: the built page (dist/) against a mocked incident API, in a real Chromium.
-// Run: npm test  (builds dist/ with a test API first)
+// Run: npm test  (builds dist-test/ with a test API first)
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -17,7 +17,7 @@ before(async () => {
   server = createServer(async (req, res) => {
     const path = new URL(req.url, 'http://x').pathname;
     try {
-      const body = await readFile(join('dist', path === '/' ? 'index.html' : path));
+      const body = await readFile(join('dist-test', path === '/' ? 'index.html' : path));
       res.writeHead(200, { 'content-type': TYPES[extname(path) || '.html'] ?? 'text/plain' });
       res.end(body);
     } catch {
@@ -44,10 +44,10 @@ const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
 });
 
 /** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
-async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false }) {
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false }) {
   const context = await browser.newContext({ locale, timezoneId });
   const page = await context.newPage();
-  const calls = { incidents: [], ack: [] };
+  const calls = { incidents: [], ack: [], lastCursor: null };
   let n = 0;
   await page.route(`${API}/**`, async (route) => {
     const url = new URL(route.request().url());
@@ -57,10 +57,12 @@ async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 
       if (k === 0 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
       if (k === 0 && failFirst) return route.fulfill({ status: 500, body: 'boom' });
       const incidents = pages[Math.min(k, pages.length - 1)];
+      calls.lastCursor = `c${k}`;
       return route.fulfill({ json: { updatedAt: new Date().toISOString(), incidents, cursor: `c${k}` } });
     }
     if (url.pathname.endsWith('/ack')) {
-      calls.ack.push(url);
+      calls.ack.push({ url, latest: calls.lastCursor });
+      if (failAck) return route.fulfill({ status: 503, body: 'ack store down' });
       const id = url.searchParams.get('id');
       return route.fulfill({ json: { id, ackedAt: '2026-11-12T17:40:00.000Z', receipt: `r-${id}` } });
     }
@@ -117,8 +119,9 @@ test('Ack acks that incident with the latest cursor and the mark survives refres
   await page.click('[data-id="INC-1"] [data-testid="ack"]');
   await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
   assert.equal(calls.ack.length, 1);
-  assert.equal(calls.ack[0].searchParams.get('id'), 'INC-1');
-  assert.match(calls.ack[0].searchParams.get('cursor'), /^c\d+$/);
+  assert.equal(calls.ack[0].url.searchParams.get('id'), 'INC-1');
+  assert.equal(calls.ack[0].url.searchParams.get('cursor'), calls.ack[0].latest);
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.testid), 'acked');
   assert.equal(await page.$('[data-id="INC-2"] [data-testid="acked"]'), null);
   await page.waitForTimeout(2500);
   assert.notEqual(await page.$('[data-id="INC-1"] [data-testid="acked"]'), null);
@@ -168,5 +171,29 @@ test('the page names its build in the head and the footer (R6)', async () => {
   const meta = await page.getAttribute('meta[name="build"]', 'content');
   assert.match(meta, /^[0-9a-f]{40}$/);
   assert.equal(await page.textContent('[data-testid="build-sha"]'), meta);
+  await context.close();
+});
+
+test('a refresh updates a row in place and drops an incident that is gone', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [{ ...first[0], severity: 'sev1', summary: 'webhooks down' }];
+  const { page, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-id="INC-1"]');
+  await page.waitForSelector('[data-id="INC-1"]', { state: 'detached', timeout: 4000 });
+  assert.equal(await page.textContent('[data-id="INC-2"] .sev'), 'sev1');
+  assert.match(await page.textContent('[data-id="INC-2"] .what'), /webhooks down/);
+  assert.match(await page.getAttribute('[data-id="INC-2"]', 'class'), /\bsev1\b/);
+  await context.close();
+});
+
+test('a failed ack stays on its row through refreshes and the button comes back', async () => {
+  const { page, context } = await open({ pages: [[inc('INC-1', '2026-11-12T17:00:00Z')]], failAck: true });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] .ack-error:not([hidden])');
+  await page.waitForTimeout(4500);
+  assert.equal(await page.isVisible('[data-id="INC-1"] .ack-error'), true);
+  assert.match(await page.textContent('[data-id="INC-1"] .ack-error'), /Ack failed: ack: 503/);
+  assert.equal(await page.isEnabled('[data-id="INC-1"] [data-testid="ack"]'), true);
+  assert.equal(await page.$('[data-id="INC-1"] [data-testid="acked"]'), null);
   await context.close();
 });
