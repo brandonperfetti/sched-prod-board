@@ -16,7 +16,7 @@
     <main data-testid="board" aria-busy="true">
       <p data-testid="loader" class="loader" role="status">Loading incidents…</p>
       <p data-testid="empty" class="empty" hidden>No incidents tonight.</p>
-      <p data-testid="error" class="error" role="alert" hidden></p>
+      <div class="error-slot"><p data-testid="error" class="error" role="alert" hidden></p></div>
       <div class="new-slot" aria-live="polite">
         <button type="button" data-testid="new-bar" class="new-bar" hidden></button>
       </div>

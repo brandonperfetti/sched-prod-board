@@ -44,8 +44,8 @@ const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
 });
 
 /** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
-async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {} }) {
-  const context = await browser.newContext({ locale, timezoneId });
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {}, failAt = [], viewport } = {}) {
+  const context = await browser.newContext({ locale, timezoneId, ...(viewport ? { viewport } : {}) });
   const page = await context.newPage();
   const calls = { incidents: [], ack: [], lastCursor: null };
   let n = 0;
@@ -56,7 +56,7 @@ async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 
       calls.incidents.push(url);
       if (k === 0 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
       if (delayAt[k]) await new Promise((r) => setTimeout(r, delayAt[k]));
-      if (k === 0 && failFirst) return route.fulfill({ status: 500, body: 'boom' });
+      if ((k === 0 && failFirst) || failAt.includes(k)) return route.fulfill({ status: 500, body: 'boom' });
       const incidents = pages[Math.min(k, pages.length - 1)];
       calls.lastCursor = `c${k}`;
       return route.fulfill({ json: { updatedAt: new Date().toISOString(), incidents, cursor: `c${k}` } });
@@ -109,7 +109,7 @@ test('the list holds still: a new incident waits behind the N new bar, and the b
   assert.equal(await page.isHidden('[data-testid="new-bar"]'), true);
   assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
   assert.notEqual(await page.$('[data-id="INC-3"] [data-testid="ack"]'), null, 'the new top row has its Ack');
-  assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-testid="incident-row"]')?.dataset.id), 'INC-3');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.id), 'INC-3', 'focus is on the new top row, not its Ack');
   await context.close();
 });
 
@@ -212,6 +212,8 @@ test('a refresh updates a row in place; a gone incident stays until the bar is c
   assert.match(await page.textContent('[data-id="INC-2"] .what'), /webhooks down/);
   assert.match(await page.getAttribute('[data-id="INC-2"]', 'class'), /\bsev1\b/);
   assert.notEqual(await page.$('[data-id="INC-1"]'), null, 'the gone row holds until the bar');
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true, 'a gone incident cannot be acked');
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Closed');
   assert.equal(await page.textContent('[data-testid="new-bar"]'), 'list changed · show');
   await page.click('[data-testid="new-bar"]');
   assert.equal(await page.$('[data-id="INC-1"]'), null);
@@ -256,5 +258,46 @@ test('an unchanged refresh changes nothing in the list', async () => {
   });
   await page.waitForTimeout(4500);
   assert.equal(await page.evaluate(() => window.__mutations), 0);
+  await context.close();
+});
+
+const ackY = (page, id) => page.$eval(`[data-id="${id}"] [data-testid="ack"]`, (b) => b.getBoundingClientRect().y);
+
+test('a load error appearing and hiding moves no row', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], failAt: [1] });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const y0 = await ackY(page, 'INC-1');
+  await page.waitForSelector('[data-testid="error"]:not([hidden])', { timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  await page.waitForSelector('[data-testid="error"]', { state: 'hidden', timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  await context.close();
+});
+
+test('a longer summary written into a row on a narrow screen moves no other row', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const long = 'webhook retries piling up across every studio in the region while the queue backs up and drains slowly';
+  const second = [{ ...first[0], summary: long }, first[1]];
+  const { page, context } = await open({ pages: [first, second], viewport: { width: 700, height: 600 } });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const y0 = await ackY(page, 'INC-1');
+  await page.waitForFunction((t) => document.querySelector('[data-id="INC-2"] .what')?.textContent.includes(t), 'drains slowly', { timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  assert.equal(await page.getAttribute('[data-id="INC-2"] .what', 'title'), `booking-api · eu-west · ${long}`);
+  await context.close();
+});
+
+test('pressing Enter twice on the bar acks nothing', async () => {
+  const first = [inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [inc('INC-2', '2026-11-12T17:10:00Z'), ...first];
+  const { page, calls, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 5000 });
+  await page.focus('[data-testid="new-bar"]');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(500);
+  assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
+  assert.equal(calls.ack.length, 0);
   await context.close();
 });

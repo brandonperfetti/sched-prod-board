@@ -3,7 +3,7 @@ header, main, footer { padding: 12px 24px; }
 h1 { margin: 0; font-size: 22px; }
 .sub { margin: 2px 0 0; color: #666; }
 .list { list-style: none; margin: 0; padding: 0; max-width: 960px; }
-.row { display: grid; grid-template-columns: 90px 50px 1fr 200px auto auto; gap: 12px; align-items: center; min-height: 44px; padding: 0 12px; border-bottom: 1px solid #e5e5e5; background: #fff; }
+.row { display: grid; grid-template-columns: 90px 50px 1fr 200px auto auto; gap: 12px; align-items: center; height: 44px; padding: 0 12px; border-bottom: 1px solid #e5e5e5; background: #fff; }
 .row .id { font-family: ui-monospace, monospace; }
 .row.sev1 .sev { color: #b00020; font-weight: 600; }
 .row.sev2 .sev { color: #a15c00; }
@@ -21,3 +21,10 @@ footer code { font-family: ui-monospace, monospace; }
 .new-slot { height: 40px; max-width: 960px; display: flex; align-items: center; }
 .new-bar { width: 100%; height: 32px; font: inherit; font-weight: 600; color: #fff; background: #0a66c2; border: 0; border-radius: 6px; cursor: pointer; }
 .new-bar:focus-visible { outline: 2px solid #1d1d1f; outline-offset: 2px; }
+/* Rows keep one height whatever a refresh writes into them, so an update moves no other row (R1). */
+.row > * { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.gone { color: #888; }
+.row:focus-visible { outline: 2px solid #0a66c2; outline-offset: -2px; }
+/* The error keeps a reserved one-line slot, so it appearing or hiding moves no row. */
+.error-slot { height: 24px; max-width: 960px; }
+.error-slot .error { margin: 0; line-height: 24px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

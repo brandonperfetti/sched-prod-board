@@ -52,6 +52,18 @@ async function onAck(id, button, rowError) {
   }
 }
 
+/**
+ * A row whose incident left the API's list stays put until the bar (R1) but can no longer be acked; it comes
+ * back to life if the incident returns. An ack already in flight is left alone.
+ */
+function markGone(row, gone) {
+  const button = row.querySelector('[data-testid="ack"]');
+  if (!button || button.textContent === 'Acking…') return;
+  set(button, 'disabled', gone);
+  set(button, 'textContent', gone ? 'Closed' : 'Ack');
+  row.classList.toggle('gone', gone);
+}
+
 /** Sets a value only when it differs, so an unchanged refresh makes no DOM mutation (no live-region noise). */
 function set(node, key, value) {
   if (node[key] !== value) node[key] = value;
@@ -61,7 +73,9 @@ function set(node, key, value) {
 function fill(row, i) {
   set(row, 'className', `row ${i.severity}`);
   set(row.querySelector('.sev'), 'textContent', i.severity);
-  set(row.querySelector('.what'), 'textContent', `${i.service} · ${i.region} · ${i.summary}`);
+  const what = `${i.service} · ${i.region} · ${i.summary}`;
+  set(row.querySelector('.what'), 'textContent', what);
+  set(row.querySelector('.what'), 'title', what);
   const time = row.querySelector('time');
   set(time, 'dateTime', i.openedAt);
   set(time, 'title', i.openedAt);
@@ -69,7 +83,7 @@ function fill(row, i) {
 }
 
 function buildRow(i) {
-  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id });
+  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id, tabindex: '-1' });
   row.append(el('span', { class: 'id' }, i.id), el('span', { class: 'sev' }), el('span', { class: 'what' }), el('time'));
   const rowError = el('span', { class: 'ack-error', role: 'alert' });
   rowError.hidden = true;
@@ -139,7 +153,12 @@ export function render(incidents) {
   const latest = new Set(incidents.map((i) => i.id));
   const fresh = incidents.filter((i) => !rows.has(i.id)).length;
   const gone = [...rows.keys()].filter((id) => !latest.has(id)).length;
-  for (const i of incidents) if (rows.has(i.id)) fill(rows.get(i.id), i);
+  for (const i of incidents) {
+    if (!rows.has(i.id)) continue;
+    fill(rows.get(i.id), i);
+    markGone(rows.get(i.id), false);
+  }
+  for (const [id, row] of rows) if (!latest.has(id)) markGone(row, true);
   if (!fresh && !gone) {
     pending = null;
     newBar.hidden = true;
@@ -153,7 +172,8 @@ export function render(incidents) {
 newBar.addEventListener('click', () => {
   if (!pending) return;
   apply(pending);
-  list.firstElementChild?.querySelector('[data-testid="ack"]')?.focus();
+  // Focus the new top row itself, not its Ack: a repeated Enter on the bar must not ack anything.
+  list.firstElementChild?.focus();
 });
 
 
