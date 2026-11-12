@@ -44,7 +44,7 @@ const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
 });
 
 /** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
-async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {}, failAt = [], viewport } = {}) {
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {}, failAt = [], viewport, ackDelay = 0 } = {}) {
   const context = await browser.newContext({ locale, timezoneId, ...(viewport ? { viewport } : {}) });
   const page = await context.newPage();
   const calls = { incidents: [], ack: [], lastCursor: null };
@@ -63,6 +63,7 @@ async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 
     }
     if (url.pathname.endsWith('/ack')) {
       calls.ack.push({ url, latest: calls.lastCursor });
+      if (ackDelay) await new Promise((r) => setTimeout(r, ackDelay));
       if (failAck) return route.fulfill({ status: 503, body: 'ack store down' });
       const id = url.searchParams.get('id');
       return route.fulfill({ json: { id, ackedAt: '2026-11-12T17:40:00.000Z', receipt: `r-${id}` } });
@@ -311,5 +312,41 @@ test('at phone width every row shows its summary and the page does not scroll si
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 375), 'no sideways scroll');
   const box = await page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => b.getBoundingClientRect().right);
   assert.ok(box <= 375);
+  await context.close();
+});
+
+test('an acked row whose incident leaves the list is marked gone too', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [first, first, [first[0]]] });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  await page.waitForSelector('[data-id="INC-1"].gone', { timeout: 6000 });
+  await context.close();
+});
+
+test('an Ack that fails after its incident left the list leaves it un-ackable', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [first, [first[0]]], failAck: true, ackDelay: 3500 });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"].gone', { timeout: 4000 });
+  await page.waitForSelector('[data-id="INC-1"] .ack-error:not([hidden])', { timeout: 4000 });
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true);
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Gone from list');
+  await context.close();
+});
+
+test('an Ack pending while the bar rebuilds its row lands on the row on screen, once', async () => {
+  const both = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [both, [both[0]], [both[0]], both], ackDelay: 7000 });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.$('[data-id="INC-1"]'), null);
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 6000 });
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Acking…');
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true);
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 6000 });
+  assert.equal(calls.ack.length, 1);
   await context.close();
 });

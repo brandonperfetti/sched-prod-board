@@ -30,40 +30,66 @@ function ackedMark(reply) {
   return el('span', { 'data-testid': 'acked', class: 'acked', tabindex: '-1' }, `acked ${formatLocal(reply.ackedAt)}`);
 }
 
-/** Acks one row. A failure stays on that row until its next try, so a refresh never hides it. */
-async function onAck(id, button, rowError) {
+/** Acks in flight, by incident id: one request per incident, whichever row is on screen for it. */
+const inFlight = new Set();
+/** Incident ids in the API's latest answer; a row not in it is gone from the list. */
+let listed = new Set();
+
+const ackButtonOf = (id) => rows.get(id)?.querySelector('[data-testid="ack"]') ?? null;
+
+/** Puts a row's Ack button in its state: open, in flight, or gone from the list. */
+function setAckState(button, state) {
+  set(button, 'disabled', state !== 'open');
+  set(button, 'textContent', { open: 'Ack', inFlight: 'Acking…', gone: 'Gone from list' }[state]);
+}
+
+/**
+ * Acks one incident. The reply goes to the row on screen for it when it lands, which may be a row the bar
+ * rebuilt meanwhile. A failure stays on that row until its next try, so a refresh never hides it.
+ */
+async function onAck(id) {
+  if (inFlight.has(id) || acked.has(id)) return;
+  const button = ackButtonOf(id);
   // Read focus before disabling: a disabled button drops it.
-  const hadFocus = document.activeElement === button;
-  button.disabled = true;
-  button.dataset.inFlight = '1';
-  button.textContent = 'Acking…';
-  rowError.hidden = true;
+  const hadFocus = button !== null && document.activeElement === button;
+  inFlight.add(id);
+  if (button) setAckState(button, 'inFlight');
+  const error = rows.get(id)?.querySelector('.ack-error');
+  if (error) error.hidden = true;
   try {
     const reply = await ack(id);
     acked.set(id, reply);
-    const mark = ackedMark(reply);
-    button.replaceWith(mark);
-    if (hadFocus) mark.focus();
+    const current = ackButtonOf(id);
+    if (current) {
+      const mark = ackedMark(reply);
+      current.replaceWith(mark);
+      if (hadFocus) mark.focus();
+    }
   } catch (err) {
-    delete button.dataset.inFlight;
-    button.disabled = false;
-    button.textContent = 'Ack';
-    rowError.textContent = `Ack failed: ${err.message}`;
-    rowError.hidden = false;
-    if (hadFocus) button.focus();
+    const current = ackButtonOf(id);
+    if (current) {
+      setAckState(current, listed.has(id) ? 'open' : 'gone');
+      if (hadFocus) current.focus();
+    }
+    const rowError = rows.get(id)?.querySelector('.ack-error');
+    if (rowError) {
+      rowError.textContent = `Ack failed: ${err.message}`;
+      rowError.hidden = false;
+    }
+  } finally {
+    inFlight.delete(id);
   }
 }
 
 /**
  * A row whose incident left the API's list stays put until the bar (R1) but can no longer be acked; it comes
- * back to life if the incident returns. An ack already in flight is left alone.
+ * back to life if the incident returns. Every such row is marked, acked or not; an ack in flight is left alone.
  */
 function markGone(row, gone) {
-  const button = row.querySelector('[data-testid="ack"]');
-  if (!button || button.dataset.inFlight) return;
-  set(button, 'disabled', gone);
-  set(button, 'textContent', gone ? 'Gone from list' : 'Ack');
   row.classList.toggle('gone', gone);
+  const button = row.querySelector('[data-testid="ack"]');
+  if (!button || inFlight.has(row.dataset.id)) return;
+  setAckState(button, gone ? 'gone' : 'open');
 }
 
 /** Sets a value only when it differs, so an unchanged refresh makes no DOM mutation (no live-region noise). */
@@ -93,7 +119,8 @@ function buildRow(i) {
     row.append(ackedMark(acked.get(i.id)));
   } else {
     const button = el('button', { type: 'button', 'data-testid': 'ack', 'aria-label': `Ack ${i.id}` }, 'Ack');
-    button.addEventListener('click', () => onAck(i.id, button, rowError));
+    if (inFlight.has(i.id)) setAckState(button, 'inFlight');
+    button.addEventListener('click', () => onAck(i.id));
     row.append(button);
   }
   row.append(rowError);
@@ -151,8 +178,9 @@ let loaded = false;
  * row moves under a pointer between aim and click.
  */
 export function render(incidents) {
+  listed = new Set(incidents.map((i) => i.id));
   if (!loaded) return apply(incidents);
-  const latest = new Set(incidents.map((i) => i.id));
+  const latest = listed;
   const fresh = incidents.filter((i) => !rows.has(i.id)).length;
   const gone = [...rows.keys()].filter((id) => !latest.has(id)).length;
   for (const i of incidents) {
