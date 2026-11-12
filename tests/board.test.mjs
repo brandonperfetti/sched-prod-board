@@ -1,0 +1,172 @@
+// Board tests: the built page (dist/) against a mocked incident API, in a real Chromium.
+// Run: npm test  (builds dist/ with a test API first)
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { readFile } from 'node:fs/promises';
+import { extname, join } from 'node:path';
+import { chromium } from 'playwright';
+
+const API = 'https://api.test/api';
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' };
+let server;
+let origin;
+let browser;
+
+before(async () => {
+  server = createServer(async (req, res) => {
+    const path = new URL(req.url, 'http://x').pathname;
+    try {
+      const body = await readFile(join('dist', path === '/' ? 'index.html' : path));
+      res.writeHead(200, { 'content-type': TYPES[extname(path) || '.html'] ?? 'text/plain' });
+      res.end(body);
+    } catch {
+      res.writeHead(404).end();
+    }
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  origin = `http://127.0.0.1:${server.address().port}`;
+  browser = await chromium.launch();
+});
+
+after(async () => {
+  await browser?.close();
+  server?.close();
+});
+
+const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
+  id,
+  service: 'booking-api',
+  region: 'eu-west',
+  summary,
+  severity: 'sev2',
+  openedAt,
+});
+
+/** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false }) {
+  const context = await browser.newContext({ locale, timezoneId });
+  const page = await context.newPage();
+  const calls = { incidents: [], ack: [] };
+  let n = 0;
+  await page.route(`${API}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith('/incidents')) {
+      const k = n++;
+      calls.incidents.push(url);
+      if (k === 0 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
+      if (k === 0 && failFirst) return route.fulfill({ status: 500, body: 'boom' });
+      const incidents = pages[Math.min(k, pages.length - 1)];
+      return route.fulfill({ json: { updatedAt: new Date().toISOString(), incidents, cursor: `c${k}` } });
+    }
+    if (url.pathname.endsWith('/ack')) {
+      calls.ack.push(url);
+      const id = url.searchParams.get('id');
+      return route.fulfill({ json: { id, ackedAt: '2026-11-12T17:40:00.000Z', receipt: `r-${id}` } });
+    }
+    return route.fulfill({ status: 404 });
+  });
+  await page.goto(origin);
+  return { page, calls, context };
+}
+
+const ids = (page) => page.$$eval('[data-testid="incident-row"]', (rs) => rs.map((r) => r.dataset.id));
+
+test('a loader shows until incidents load, then the list (SCHED-4512)', async () => {
+  const { page, context } = await open({ pages: [[inc('INC-1', '2026-11-12T17:00:00Z')]], delayFirst: 800 });
+  assert.equal(await page.isVisible('[data-testid="loader"]'), true);
+  await page.waitForSelector('[data-testid="incident-row"]');
+  assert.equal(await page.$('[data-testid="loader"]'), null);
+  await context.close();
+});
+
+test('an empty night shows the empty state, not a blank board', async () => {
+  const { page, context } = await open({ pages: [[]] });
+  await page.waitForSelector('[data-testid="empty"]:not([hidden])');
+  assert.equal(await page.$('[data-testid="loader"]'), null);
+  await context.close();
+});
+
+test('a new incident appears at the top without a reload, and existing rows stay put (SCHED-4511, 4513)', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [inc('INC-3', '2026-11-12T17:20:00Z'), ...first];
+  const { page, calls, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-testid="incident-row"]');
+  assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
+  await page.$eval('[data-id="INC-1"]', (r) => (r.dataset.marker = 'same-node'));
+  await page.waitForSelector('[data-id="INC-3"]', { timeout: 4000 });
+  assert.deepEqual(await ids(page), ['INC-3', 'INC-2', 'INC-1']);
+  assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
+  assert.ok(calls.incidents.length >= 2);
+  await context.close();
+});
+
+test('the board refreshes itself every 2 seconds (SCHED-4513)', async () => {
+  const { page, calls, context } = await open({ pages: [[inc('INC-1', '2026-11-12T17:00:00Z')]] });
+  await page.waitForSelector('[data-testid="incident-row"]');
+  const start = calls.incidents.length;
+  await page.waitForTimeout(4500);
+  const made = calls.incidents.length - start;
+  assert.ok(made >= 2 && made <= 3, `expected 2–3 refreshes in 4.5 s, got ${made}`);
+  await context.close();
+});
+
+test('Ack acks that incident with the latest cursor and the mark survives refreshes (SCHED-4511)', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [rows] });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  assert.equal(calls.ack.length, 1);
+  assert.equal(calls.ack[0].searchParams.get('id'), 'INC-1');
+  assert.match(calls.ack[0].searchParams.get('cursor'), /^c\d+$/);
+  assert.equal(await page.$('[data-id="INC-2"] [data-testid="acked"]'), null);
+  await page.waitForTimeout(2500);
+  assert.notEqual(await page.$('[data-id="INC-1"] [data-testid="acked"]'), null);
+  assert.equal(await page.$('[data-id="INC-1"] [data-testid="ack"]'), null);
+  await context.close();
+});
+
+test('times show in the viewer zone and order, with full UTC in datetime (SCHED-4514)', async () => {
+  const at = '2026-11-12T03:03:00.000Z';
+  const berlin = await open({ pages: [[inc('INC-1', at)]], locale: 'de-DE', timezoneId: 'Europe/Berlin' });
+  const b = await berlin.page.waitForSelector('[data-id="INC-1"] time');
+  assert.equal(await b.getAttribute('datetime'), at);
+  assert.match(await b.textContent(), /^12\.11\., 04:03/);
+  await berlin.context.close();
+
+  const auckland = await open({ pages: [[inc('INC-1', at)]], locale: 'en-NZ', timezoneId: 'Pacific/Auckland' });
+  const a = await auckland.page.waitForSelector('[data-id="INC-1"] time');
+  assert.match(await a.textContent(), /^12\/11, 0?4:03\s?pm NZDT/i);
+  await auckland.context.close();
+
+  const london = await open({ pages: [[inc('INC-1', at)]], locale: 'en-GB', timezoneId: 'Europe/London' });
+  const l = await london.page.waitForSelector('[data-id="INC-1"] time');
+  assert.match(await l.textContent(), /^12\/11, 03:03/);
+  await london.context.close();
+});
+
+test('incident text is shown as text, never run as HTML', async () => {
+  const evil = '<img src=x onerror="window.__pwned=1">';
+  const { page, context } = await open({ pages: [[inc('INC-1', '2026-11-12T17:00:00Z', evil)]] });
+  await page.waitForSelector('[data-testid="incident-row"]');
+  assert.equal(await page.$('[data-testid="incident-row"] img'), null);
+  assert.ok((await page.textContent('[data-id="INC-1"] .what')).includes(evil));
+  assert.equal(await page.evaluate(() => window.__pwned), undefined);
+  await context.close();
+});
+
+test('a failed load says so and recovers on the next refresh', async () => {
+  const { page, context } = await open({ pages: [[inc('INC-1', '2026-11-12T17:00:00Z')]], failFirst: true });
+  await page.waitForSelector('[data-testid="error"]:not([hidden])');
+  await page.waitForSelector('[data-testid="incident-row"]', { timeout: 4000 });
+  assert.equal(await page.isHidden('[data-testid="error"]'), true);
+  await context.close();
+});
+
+test('the page names its build in the head and the footer (R6)', async () => {
+  const { page, context } = await open({ pages: [[]] });
+  const meta = await page.getAttribute('meta[name="build"]', 'content');
+  assert.match(meta, /^[0-9a-f]{40}$/);
+  assert.equal(await page.textContent('[data-testid="build-sha"]'), meta);
+  await context.close();
+});
