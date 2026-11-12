@@ -12,6 +12,7 @@ const loader = document.querySelector('[data-testid="loader"]');
 const empty = document.querySelector('[data-testid="empty"]');
 const error = document.querySelector('[data-testid="error"]');
 const updated = document.querySelector('.updated');
+const newBar = document.querySelector('[data-testid="new-bar"]');
 
 /** Rows on screen by incident id, so a refresh updates them in place instead of rebuilding the list. */
 const rows = new Map();
@@ -93,11 +94,11 @@ function newestFirst(incidents) {
 }
 
 /**
- * Puts the list in the given order, reusing existing rows so acks and focus survive a refresh.
- * Every answer from the API is the whole current list, `since` included (measured 2026-11-12), so a row
- * missing from it is gone.
+ * Puts the whole list in order, reusing existing rows so acks and focus survive. Used on first load and when
+ * on-call clicks the "N new" bar. Every answer from the API is the whole current list, `since` included
+ * (measured 2026-11-12), so a row missing from it is gone.
  */
-export function render(incidents) {
+function apply(incidents) {
   const ordered = newestFirst(incidents);
   const keep = new Set(ordered.map((i) => i.id));
   for (const [id, row] of rows) {
@@ -119,9 +120,42 @@ export function render(incidents) {
     before = row.nextElementSibling;
   }
   empty.hidden = ordered.length > 0;
+  pending = null;
+  newBar.hidden = true;
 }
 
+/** The latest list while it differs from the one on screen; the bar applies it. */
+let pending = null;
+/** Set after the first successful load; until then a refresh draws the whole list. */
 let loaded = false;
+
+/**
+ * Product's decision (2026-11-12): the list holds still while it is on screen. A refresh only rewrites the
+ * rows already shown; new incidents wait behind the "N new" bar (and a gone row stays until then), so no
+ * row moves under a pointer between aim and click.
+ */
+export function render(incidents) {
+  if (!loaded) return apply(incidents);
+  const latest = new Set(incidents.map((i) => i.id));
+  const fresh = incidents.filter((i) => !rows.has(i.id)).length;
+  const gone = [...rows.keys()].filter((id) => !latest.has(id)).length;
+  for (const i of incidents) if (rows.has(i.id)) fill(rows.get(i.id), i);
+  if (!fresh && !gone) {
+    pending = null;
+    newBar.hidden = true;
+    return;
+  }
+  pending = incidents;
+  set(newBar, 'textContent', fresh ? `${fresh} new ${fresh === 1 ? 'incident' : 'incidents'} · show` : 'list changed · show');
+  newBar.hidden = false;
+}
+
+newBar.addEventListener('click', () => {
+  if (!pending) return;
+  apply(pending);
+  list.firstElementChild?.querySelector('[data-testid="ack"]')?.focus();
+});
+
 
 function showLoadError(message) {
   error.textContent = `Could not load incidents: ${message}. Retrying.`;

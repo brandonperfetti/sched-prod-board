@@ -17,3 +17,7 @@ footer { color: #777; font-size: 13px; }
 .row .acked { color: #1a7f37; font-weight: 600; }
 footer code { font-family: ui-monospace, monospace; }
 .row .ack-error { color: #b00020; font-size: 13px; }
+/* The bar's slot keeps its height whether or not the bar shows, so the bar appearing moves no row. */
+.new-slot { height: 40px; max-width: 960px; display: flex; align-items: center; }
+.new-bar { width: 100%; height: 32px; font: inherit; font-weight: 600; color: #fff; background: #0a66c2; border: 0; border-radius: 6px; cursor: pointer; }
+.new-bar:focus-visible { outline: 2px solid #1d1d1f; outline-offset: 2px; }

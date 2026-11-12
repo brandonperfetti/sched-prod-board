@@ -90,17 +90,44 @@ test('an empty night shows the empty state, not a blank board', async () => {
   await context.close();
 });
 
-test('a new incident appears at the top without a reload, and existing rows stay put (SCHED-4511, 4513)', async () => {
+test('the list holds still: a new incident waits behind the N new bar, and the bar brings it in on top (product 2026-11-12)', async () => {
   const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
   const second = [inc('INC-3', '2026-11-12T17:20:00Z'), ...first];
   const { page, calls, context } = await open({ pages: [first, second] });
   await page.waitForSelector('[data-testid="incident-row"]');
-  assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
+  assert.equal(await page.isHidden('[data-testid="new-bar"]'), true);
+  const y = () => page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => b.getBoundingClientRect().y);
+  const y0 = await y();
   await page.$eval('[data-id="INC-1"]', (r) => (r.dataset.marker = 'same-node'));
-  await page.waitForSelector('[data-id="INC-3"]', { timeout: 4000 });
-  assert.deepEqual(await ids(page), ['INC-3', 'INC-2', 'INC-1']);
-  assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), '1 new incident · show');
+  assert.deepEqual(await ids(page), ['INC-2', 'INC-1'], 'no row is added while the list is on screen');
+  assert.equal(await y(), y0, 'the bar appearing moves no row');
   assert.ok(calls.incidents.length >= 2);
+  await page.click('[data-testid="new-bar"]');
+  assert.deepEqual(await ids(page), ['INC-3', 'INC-2', 'INC-1']);
+  assert.equal(await page.isHidden('[data-testid="new-bar"]'), true);
+  assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
+  assert.notEqual(await page.$('[data-id="INC-3"] [data-testid="ack"]'), null, 'the new top row has its Ack');
+  assert.equal(await page.evaluate(() => document.activeElement?.closest('[data-testid="incident-row"]')?.dataset.id), 'INC-3');
+  await context.close();
+});
+
+test('an Ack aimed while new incidents arrive lands on the row aimed at', async () => {
+  const first = [inc('INC-3', '2026-11-12T17:20:00Z'), inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [inc('INC-5', '2026-11-12T17:40:00Z'), inc('INC-4', '2026-11-12T17:30:00Z'), ...first];
+  const { page, calls, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="ack"]');
+  const box = await page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => {
+    const r = b.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+  await page.mouse.move(box.x, box.y);
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  await page.mouse.click(box.x, box.y);
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  assert.deepEqual(calls.ack.map((a) => a.url.searchParams.get('id')), ['INC-1']);
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), '2 new incidents · show');
   await context.close();
 });
 
@@ -175,15 +202,19 @@ test('the page names its build in the head and the footer (R6)', async () => {
   await context.close();
 });
 
-test('a refresh updates a row in place and drops an incident that is gone', async () => {
+test('a refresh updates a row in place; a gone incident stays until the bar is clicked', async () => {
   const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
   const second = [{ ...first[0], severity: 'sev1', summary: 'webhooks down' }];
   const { page, context } = await open({ pages: [first, second] });
   await page.waitForSelector('[data-id="INC-1"]');
-  await page.waitForSelector('[data-id="INC-1"]', { state: 'detached', timeout: 4000 });
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
   assert.equal(await page.textContent('[data-id="INC-2"] .sev'), 'sev1');
   assert.match(await page.textContent('[data-id="INC-2"] .what'), /webhooks down/);
   assert.match(await page.getAttribute('[data-id="INC-2"]', 'class'), /\bsev1\b/);
+  assert.notEqual(await page.$('[data-id="INC-1"]'), null, 'the gone row holds until the bar');
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), 'list changed · show');
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.$('[data-id="INC-1"]'), null);
   await context.close();
 });
 
