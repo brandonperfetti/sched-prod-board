@@ -44,7 +44,7 @@ const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
 });
 
 /** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
-async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false }) {
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {} }) {
   const context = await browser.newContext({ locale, timezoneId });
   const page = await context.newPage();
   const calls = { incidents: [], ack: [], lastCursor: null };
@@ -55,6 +55,7 @@ async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 
       const k = n++;
       calls.incidents.push(url);
       if (k === 0 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
+      if (delayAt[k]) await new Promise((r) => setTimeout(r, delayAt[k]));
       if (k === 0 && failFirst) return route.fulfill({ status: 500, body: 'boom' });
       const incidents = pages[Math.min(k, pages.length - 1)];
       calls.lastCursor = `c${k}`;
@@ -195,5 +196,34 @@ test('a failed ack stays on its row through refreshes and the button comes back'
   assert.match(await page.textContent('[data-id="INC-1"] .ack-error'), /Ack failed: ack: 503/);
   assert.equal(await page.isEnabled('[data-id="INC-1"] [data-testid="ack"]'), true);
   assert.equal(await page.$('[data-id="INC-1"] [data-testid="acked"]'), null);
+  await context.close();
+});
+
+test('a slow refresh shows an error but is awaited, so refreshes never overlap and the cursor only moves forward', async () => {
+  const rows = [inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [rows], delayAt: { 1: 9000 } });
+  await page.waitForSelector('[data-testid="incident-row"]');
+  await page.waitForSelector('[data-testid="error"]:not([hidden])', { timeout: 12000 });
+  assert.equal(calls.incidents.length, 2, 'no new refresh while the slow one is pending');
+  await page.waitForSelector('[data-testid="error"]', { state: 'hidden', timeout: 4000 });
+  await page.waitForTimeout(2500);
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  assert.equal(calls.ack[0].url.searchParams.get('cursor'), calls.ack[0].latest);
+  await context.close();
+});
+
+test('an unchanged refresh changes nothing in the list', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows] });
+  await page.waitForSelector('[data-testid="incident-row"]');
+  await page.evaluate(() => {
+    window.__mutations = 0;
+    new MutationObserver((m) => (window.__mutations += m.length)).observe(document.querySelector('[data-testid="incident-list"]'), {
+      subtree: true, childList: true, characterData: true, attributes: true,
+    });
+  });
+  await page.waitForTimeout(4500);
+  assert.equal(await page.evaluate(() => window.__mutations), 0);
   await context.close();
 });

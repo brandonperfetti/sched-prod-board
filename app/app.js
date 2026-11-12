@@ -3,7 +3,7 @@ import { formatLocal } from './time.js';
 
 /** How often the board refreshes itself while open (R4). */
 export const REFRESH_MS = 2000;
-/** A refresh that takes longer than this counts as failed, so a hung request cannot freeze the board silently. */
+/** A refresh slower than this shows an error, so a hung request cannot freeze the board silently. */
 const TIMEOUT_MS = 8000;
 
 const board = document.querySelector('[data-testid="board"]');
@@ -51,15 +51,20 @@ async function onAck(id, button, rowError) {
   }
 }
 
+/** Sets a value only when it differs, so an unchanged refresh makes no DOM mutation (no live-region noise). */
+function set(node, key, value) {
+  if (node[key] !== value) node[key] = value;
+}
+
 /** Writes an incident's fields into its row; a refresh calls it again when the API changes them. */
 function fill(row, i) {
-  row.className = `row ${i.severity}`;
-  row.querySelector('.sev').textContent = i.severity;
-  row.querySelector('.what').textContent = `${i.service} · ${i.region} · ${i.summary}`;
+  set(row, 'className', `row ${i.severity}`);
+  set(row.querySelector('.sev'), 'textContent', i.severity);
+  set(row.querySelector('.what'), 'textContent', `${i.service} · ${i.region} · ${i.summary}`);
   const time = row.querySelector('time');
-  time.setAttribute('datetime', i.openedAt);
-  time.title = i.openedAt;
-  time.textContent = formatLocal(i.openedAt);
+  set(time, 'dateTime', i.openedAt);
+  set(time, 'title', i.openedAt);
+  set(time, 'textContent', formatLocal(i.openedAt));
 }
 
 function buildRow(i) {
@@ -116,19 +121,21 @@ export function render(incidents) {
   empty.hidden = ordered.length > 0;
 }
 
-function withTimeout(promise) {
-  let timer;
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`no answer in ${TIMEOUT_MS / 1000} s`)), TIMEOUT_MS);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
 let loaded = false;
 
+function showLoadError(message) {
+  error.textContent = `Could not load incidents: ${message}. Retrying.`;
+  error.hidden = false;
+}
+
+/**
+ * One refresh at a time: the next starts only after this one settles, so the cursor only moves forward.
+ * A slow answer shows an error after TIMEOUT_MS but is still awaited, never raced past.
+ */
 async function refresh() {
+  const slow = setTimeout(() => showLoadError(`no answer in ${TIMEOUT_MS / 1000} s`), TIMEOUT_MS);
   try {
-    const page = await withTimeout(fetchIncidents());
+    const page = await fetchIncidents();
     render(page.incidents);
     if (!loaded) {
       loaded = true;
@@ -136,11 +143,12 @@ async function refresh() {
       board.setAttribute('aria-busy', 'false');
     }
     error.hidden = true;
-    updated.textContent = `updated ${formatLocal(page.updatedAt, undefined, undefined, true)}`;
+    const when = formatLocal(page.updatedAt ?? new Date().toISOString(), undefined, undefined, true);
+    set(updated, 'textContent', `updated ${when}`);
   } catch (err) {
-    error.textContent = `Could not load incidents: ${err.message}. Retrying.`;
-    error.hidden = false;
+    showLoadError(err.message);
   } finally {
+    clearTimeout(slow);
     setTimeout(refresh, REFRESH_MS);
   }
 }

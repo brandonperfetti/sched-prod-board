@@ -5,7 +5,7 @@ course's incident API. Read `plan.md` first, then the four ready issues in `issu
 
 ## Run it
 
-1. Fill `app/config.js` with `api` and `session` from start-challenge.
+1. Have `api` and `session` from start-challenge at hand (the build writes `config.js` from them).
 2. Build: `BOARD_API=<api> BOARD_SESSION=<session> npm run build` writes `dist/` with the git sha stamped in
    (R6) and `config.js` filled. It refuses a dirty tree, so the sha always names the commit.
 3. Serve `dist/` locally: `npm run serve`. Test: `npm test` (builds against a mocked API).
