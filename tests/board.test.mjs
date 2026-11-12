@@ -350,3 +350,40 @@ test('an Ack pending while the bar rebuilds its row lands on the row on screen, 
   assert.equal(calls.ack.length, 1);
   await context.close();
 });
+
+const focusedRow = (page) => page.evaluate(() => document.activeElement?.closest('[data-testid="incident-row"]')?.dataset.id ?? null);
+
+test('focus moved during a pending Ack stays put when it fails, so the next Enter acks the row now focused', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [rows], failAck: true, ackDelay: 1500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.focus('[data-id="INC-2"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] .ack-error:not([hidden])', { timeout: 4000 });
+  assert.equal(await focusedRow(page), 'INC-2');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  assert.deepEqual(calls.ack.map((a) => a.url.searchParams.get('id')), ['INC-1', 'INC-2']);
+  await context.close();
+});
+
+test('focus moved during a pending Ack stays put when it lands', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], ackDelay: 1500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.focus('[data-id="INC-2"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 4000 });
+  assert.equal(await focusedRow(page), 'INC-2');
+  await context.close();
+});
+
+test('an Ack sent from the keyboard keeps focus on its row when nothing else took it', async () => {
+  const rows = [inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], ackDelay: 500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 4000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.testid), 'acked');
+  await context.close();
+});

@@ -50,8 +50,11 @@ function setAckState(button, state) {
 async function onAck(id) {
   if (inFlight.has(id) || acked.has(id)) return;
   const button = ackButtonOf(id);
-  // Read focus before disabling: a disabled button drops it.
+  // Read focus before disabling: a disabled button drops it to the page.
   const hadFocus = button !== null && document.activeElement === button;
+  // Give focus back only if it is still where the disabled button dropped it: once on-call has moved on to
+  // another row, pulling focus back would send their next Enter to this incident.
+  const focusStillDropped = () => hadFocus && (document.activeElement === null || document.activeElement === document.body);
   inFlight.add(id);
   if (button) setAckState(button, 'inFlight');
   const error = rows.get(id)?.querySelector('.ack-error');
@@ -63,13 +66,13 @@ async function onAck(id) {
     if (current) {
       const mark = ackedMark(reply);
       current.replaceWith(mark);
-      if (hadFocus) mark.focus();
+      if (focusStillDropped()) mark.focus();
     }
   } catch (err) {
     const current = ackButtonOf(id);
     if (current) {
       setAckState(current, listed.has(id) ? 'open' : 'gone');
-      if (hadFocus) current.focus();
+      if (focusStillDropped()) current.focus();
     }
     const rowError = rows.get(id)?.querySelector('.ack-error');
     if (rowError) {
