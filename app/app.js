@@ -35,6 +35,7 @@ async function onAck(id, button, rowError) {
   // Read focus before disabling: a disabled button drops it.
   const hadFocus = document.activeElement === button;
   button.disabled = true;
+  button.dataset.inFlight = '1';
   button.textContent = 'Acking…';
   rowError.hidden = true;
   try {
@@ -44,6 +45,7 @@ async function onAck(id, button, rowError) {
     button.replaceWith(mark);
     if (hadFocus) mark.focus();
   } catch (err) {
+    delete button.dataset.inFlight;
     button.disabled = false;
     button.textContent = 'Ack';
     rowError.textContent = `Ack failed: ${err.message}`;
@@ -58,9 +60,9 @@ async function onAck(id, button, rowError) {
  */
 function markGone(row, gone) {
   const button = row.querySelector('[data-testid="ack"]');
-  if (!button || button.textContent === 'Acking…') return;
+  if (!button || button.dataset.inFlight) return;
   set(button, 'disabled', gone);
-  set(button, 'textContent', gone ? 'Closed' : 'Ack');
+  set(button, 'textContent', gone ? 'Gone from list' : 'Ack');
   row.classList.toggle('gone', gone);
 }
 

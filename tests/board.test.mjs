@@ -213,7 +213,7 @@ test('a refresh updates a row in place; a gone incident stays until the bar is c
   assert.match(await page.getAttribute('[data-id="INC-2"]', 'class'), /\bsev1\b/);
   assert.notEqual(await page.$('[data-id="INC-1"]'), null, 'the gone row holds until the bar');
   assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true, 'a gone incident cannot be acked');
-  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Closed');
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Gone from list');
   assert.equal(await page.textContent('[data-testid="new-bar"]'), 'list changed · show');
   await page.click('[data-testid="new-bar"]');
   assert.equal(await page.$('[data-id="INC-1"]'), null);
@@ -299,5 +299,17 @@ test('pressing Enter twice on the bar acks nothing', async () => {
   await page.waitForTimeout(500);
   assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
   assert.equal(calls.ack.length, 0);
+  await context.close();
+});
+
+test('at phone width every row shows its summary and the page does not scroll sideways', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z', 'a long summary that will not fit on one phone line at all')];
+  const { page, context } = await open({ pages: [rows], viewport: { width: 375, height: 700 } });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const widths = await page.$$eval('[data-testid="incident-row"] .what', (w) => w.map((x) => x.getBoundingClientRect().width));
+  assert.ok(widths.every((w) => w > 150), `summary widths ${widths}`);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 375), 'no sideways scroll');
+  const box = await page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => b.getBoundingClientRect().right);
+  assert.ok(box <= 375);
   await context.close();
 });
