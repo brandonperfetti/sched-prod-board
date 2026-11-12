@@ -44,8 +44,8 @@ const inc = (id, openedAt, summary = 'webhook retries piling up') => ({
 });
 
 /** A page whose API answers from `pages` in turn (the last one repeats); records every request. */
-async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {} }) {
-  const context = await browser.newContext({ locale, timezoneId });
+async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 0, failFirst = false, failAck = false, delayAt = {}, failAt = [], viewport, ackDelay = 0 } = {}) {
+  const context = await browser.newContext({ locale, timezoneId, ...(viewport ? { viewport } : {}) });
   const page = await context.newPage();
   const calls = { incidents: [], ack: [], lastCursor: null };
   let n = 0;
@@ -56,13 +56,14 @@ async function open({ pages, locale = 'en-US', timezoneId = 'UTC', delayFirst = 
       calls.incidents.push(url);
       if (k === 0 && delayFirst) await new Promise((r) => setTimeout(r, delayFirst));
       if (delayAt[k]) await new Promise((r) => setTimeout(r, delayAt[k]));
-      if (k === 0 && failFirst) return route.fulfill({ status: 500, body: 'boom' });
+      if ((k === 0 && failFirst) || failAt.includes(k)) return route.fulfill({ status: 500, body: 'boom' });
       const incidents = pages[Math.min(k, pages.length - 1)];
       calls.lastCursor = `c${k}`;
       return route.fulfill({ json: { updatedAt: new Date().toISOString(), incidents, cursor: `c${k}` } });
     }
     if (url.pathname.endsWith('/ack')) {
       calls.ack.push({ url, latest: calls.lastCursor });
+      if (ackDelay) await new Promise((r) => setTimeout(r, ackDelay));
       if (failAck) return route.fulfill({ status: 503, body: 'ack store down' });
       const id = url.searchParams.get('id');
       return route.fulfill({ json: { id, ackedAt: '2026-11-12T17:40:00.000Z', receipt: `r-${id}` } });
@@ -90,17 +91,44 @@ test('an empty night shows the empty state, not a blank board', async () => {
   await context.close();
 });
 
-test('a new incident appears at the top without a reload, and existing rows stay put (SCHED-4511, 4513)', async () => {
+test('the list holds still: a new incident waits behind the N new bar, and the bar brings it in on top (product 2026-11-12)', async () => {
   const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
   const second = [inc('INC-3', '2026-11-12T17:20:00Z'), ...first];
   const { page, calls, context } = await open({ pages: [first, second] });
   await page.waitForSelector('[data-testid="incident-row"]');
-  assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
+  assert.equal(await page.isHidden('[data-testid="new-bar"]'), true);
+  const y = () => page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => b.getBoundingClientRect().y);
+  const y0 = await y();
   await page.$eval('[data-id="INC-1"]', (r) => (r.dataset.marker = 'same-node'));
-  await page.waitForSelector('[data-id="INC-3"]', { timeout: 4000 });
-  assert.deepEqual(await ids(page), ['INC-3', 'INC-2', 'INC-1']);
-  assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), '1 new incident · show');
+  assert.deepEqual(await ids(page), ['INC-2', 'INC-1'], 'no row is added while the list is on screen');
+  assert.equal(await y(), y0, 'the bar appearing moves no row');
   assert.ok(calls.incidents.length >= 2);
+  await page.click('[data-testid="new-bar"]');
+  assert.deepEqual(await ids(page), ['INC-3', 'INC-2', 'INC-1']);
+  assert.equal(await page.isHidden('[data-testid="new-bar"]'), true);
+  assert.equal(await page.$eval('[data-id="INC-1"]', (r) => r.dataset.marker), 'same-node');
+  assert.notEqual(await page.$('[data-id="INC-3"] [data-testid="ack"]'), null, 'the new top row has its Ack');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.id), 'INC-3', 'focus is on the new top row, not its Ack');
+  await context.close();
+});
+
+test('an Ack aimed while new incidents arrive lands on the row aimed at', async () => {
+  const first = [inc('INC-3', '2026-11-12T17:20:00Z'), inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [inc('INC-5', '2026-11-12T17:40:00Z'), inc('INC-4', '2026-11-12T17:30:00Z'), ...first];
+  const { page, calls, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="ack"]');
+  const box = await page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => {
+    const r = b.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  });
+  await page.mouse.move(box.x, box.y);
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  await page.mouse.click(box.x, box.y);
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  assert.deepEqual(calls.ack.map((a) => a.url.searchParams.get('id')), ['INC-1']);
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), '2 new incidents · show');
   await context.close();
 });
 
@@ -175,15 +203,21 @@ test('the page names its build in the head and the footer (R6)', async () => {
   await context.close();
 });
 
-test('a refresh updates a row in place and drops an incident that is gone', async () => {
+test('a refresh updates a row in place; a gone incident stays until the bar is clicked', async () => {
   const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
   const second = [{ ...first[0], severity: 'sev1', summary: 'webhooks down' }];
   const { page, context } = await open({ pages: [first, second] });
   await page.waitForSelector('[data-id="INC-1"]');
-  await page.waitForSelector('[data-id="INC-1"]', { state: 'detached', timeout: 4000 });
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
   assert.equal(await page.textContent('[data-id="INC-2"] .sev'), 'sev1');
   assert.match(await page.textContent('[data-id="INC-2"] .what'), /webhooks down/);
   assert.match(await page.getAttribute('[data-id="INC-2"]', 'class'), /\bsev1\b/);
+  assert.notEqual(await page.$('[data-id="INC-1"]'), null, 'the gone row holds until the bar');
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true, 'a gone incident cannot be acked');
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Gone from list');
+  assert.equal(await page.textContent('[data-testid="new-bar"]'), 'list changed · show');
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.$('[data-id="INC-1"]'), null);
   await context.close();
 });
 
@@ -225,5 +259,131 @@ test('an unchanged refresh changes nothing in the list', async () => {
   });
   await page.waitForTimeout(4500);
   assert.equal(await page.evaluate(() => window.__mutations), 0);
+  await context.close();
+});
+
+const ackY = (page, id) => page.$eval(`[data-id="${id}"] [data-testid="ack"]`, (b) => b.getBoundingClientRect().y);
+
+test('a load error appearing and hiding moves no row', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], failAt: [1] });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const y0 = await ackY(page, 'INC-1');
+  await page.waitForSelector('[data-testid="error"]:not([hidden])', { timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  await page.waitForSelector('[data-testid="error"]', { state: 'hidden', timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  await context.close();
+});
+
+test('a longer summary written into a row on a narrow screen moves no other row', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const long = 'webhook retries piling up across every studio in the region while the queue backs up and drains slowly';
+  const second = [{ ...first[0], summary: long }, first[1]];
+  const { page, context } = await open({ pages: [first, second], viewport: { width: 700, height: 600 } });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const y0 = await ackY(page, 'INC-1');
+  await page.waitForFunction((t) => document.querySelector('[data-id="INC-2"] .what')?.textContent.includes(t), 'drains slowly', { timeout: 4000 });
+  assert.equal(await ackY(page, 'INC-1'), y0);
+  assert.equal(await page.getAttribute('[data-id="INC-2"] .what', 'title'), `booking-api · eu-west · ${long}`);
+  await context.close();
+});
+
+test('pressing Enter twice on the bar acks nothing', async () => {
+  const first = [inc('INC-1', '2026-11-12T17:00:00Z')];
+  const second = [inc('INC-2', '2026-11-12T17:10:00Z'), ...first];
+  const { page, calls, context } = await open({ pages: [first, second] });
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 5000 });
+  await page.focus('[data-testid="new-bar"]');
+  await page.keyboard.press('Enter');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(500);
+  assert.deepEqual(await ids(page), ['INC-2', 'INC-1']);
+  assert.equal(calls.ack.length, 0);
+  await context.close();
+});
+
+test('at phone width every row shows its summary and the page does not scroll sideways', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z', 'a long summary that will not fit on one phone line at all')];
+  const { page, context } = await open({ pages: [rows], viewport: { width: 375, height: 700 } });
+  await page.waitForSelector('[data-id="INC-1"]');
+  const widths = await page.$$eval('[data-testid="incident-row"] .what', (w) => w.map((x) => x.getBoundingClientRect().width));
+  assert.ok(widths.every((w) => w > 150), `summary widths ${widths}`);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= 375), 'no sideways scroll');
+  const box = await page.$eval('[data-id="INC-1"] [data-testid="ack"]', (b) => b.getBoundingClientRect().right);
+  assert.ok(box <= 375);
+  await context.close();
+});
+
+test('an acked row whose incident leaves the list is marked gone too', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [first, first, [first[0]]] });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]');
+  await page.waitForSelector('[data-id="INC-1"].gone', { timeout: 6000 });
+  await context.close();
+});
+
+test('an Ack that fails after its incident left the list leaves it un-ackable', async () => {
+  const first = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [first, [first[0]]], failAck: true, ackDelay: 3500 });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"].gone', { timeout: 4000 });
+  await page.waitForSelector('[data-id="INC-1"] .ack-error:not([hidden])', { timeout: 4000 });
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true);
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Gone from list');
+  await context.close();
+});
+
+test('an Ack pending while the bar rebuilds its row lands on the row on screen, once', async () => {
+  const both = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [both, [both[0]], [both[0]], both], ackDelay: 7000 });
+  await page.click('[data-id="INC-1"] [data-testid="ack"]');
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 4000 });
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.$('[data-id="INC-1"]'), null);
+  await page.waitForSelector('[data-testid="new-bar"]:visible', { timeout: 6000 });
+  await page.click('[data-testid="new-bar"]');
+  assert.equal(await page.textContent('[data-id="INC-1"] [data-testid="ack"]'), 'Acking…');
+  assert.equal(await page.isDisabled('[data-id="INC-1"] [data-testid="ack"]'), true);
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 6000 });
+  assert.equal(calls.ack.length, 1);
+  await context.close();
+});
+
+const focusedRow = (page) => page.evaluate(() => document.activeElement?.closest('[data-testid="incident-row"]')?.dataset.id ?? null);
+
+test('focus moved during a pending Ack stays put when it fails, so the next Enter acks the row now focused', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, calls, context } = await open({ pages: [rows], failAck: true, ackDelay: 1500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.focus('[data-id="INC-2"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] .ack-error:not([hidden])', { timeout: 4000 });
+  assert.equal(await focusedRow(page), 'INC-2');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(200);
+  assert.deepEqual(calls.ack.map((a) => a.url.searchParams.get('id')), ['INC-1', 'INC-2']);
+  await context.close();
+});
+
+test('focus moved during a pending Ack stays put when it lands', async () => {
+  const rows = [inc('INC-2', '2026-11-12T17:10:00Z'), inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], ackDelay: 1500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.focus('[data-id="INC-2"] [data-testid="ack"]');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 4000 });
+  assert.equal(await focusedRow(page), 'INC-2');
+  await context.close();
+});
+
+test('an Ack sent from the keyboard keeps focus on its row when nothing else took it', async () => {
+  const rows = [inc('INC-1', '2026-11-12T17:00:00Z')];
+  const { page, context } = await open({ pages: [rows], ackDelay: 500 });
+  await page.focus('[data-id="INC-1"] [data-testid="ack"]');
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('[data-id="INC-1"] [data-testid="acked"]', { timeout: 4000 });
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.testid), 'acked');
   await context.close();
 });

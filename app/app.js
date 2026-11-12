@@ -12,6 +12,7 @@ const loader = document.querySelector('[data-testid="loader"]');
 const empty = document.querySelector('[data-testid="empty"]');
 const error = document.querySelector('[data-testid="error"]');
 const updated = document.querySelector('.updated');
+const newBar = document.querySelector('[data-testid="new-bar"]');
 
 /** Rows on screen by incident id, so a refresh updates them in place instead of rebuilding the list. */
 const rows = new Map();
@@ -29,26 +30,69 @@ function ackedMark(reply) {
   return el('span', { 'data-testid': 'acked', class: 'acked', tabindex: '-1' }, `acked ${formatLocal(reply.ackedAt)}`);
 }
 
-/** Acks one row. A failure stays on that row until its next try, so a refresh never hides it. */
-async function onAck(id, button, rowError) {
-  // Read focus before disabling: a disabled button drops it.
-  const hadFocus = document.activeElement === button;
-  button.disabled = true;
-  button.textContent = 'Acking…';
-  rowError.hidden = true;
+/** Acks in flight, by incident id: one request per incident, whichever row is on screen for it. */
+const inFlight = new Set();
+/** Incident ids in the API's latest answer; a row not in it is gone from the list. */
+let listed = new Set();
+
+const ackButtonOf = (id) => rows.get(id)?.querySelector('[data-testid="ack"]') ?? null;
+
+/** Puts a row's Ack button in its state: open, in flight, or gone from the list. */
+function setAckState(button, state) {
+  set(button, 'disabled', state !== 'open');
+  set(button, 'textContent', { open: 'Ack', inFlight: 'Acking…', gone: 'Gone from list' }[state]);
+}
+
+/**
+ * Acks one incident. The reply goes to the row on screen for it when it lands, which may be a row the bar
+ * rebuilt meanwhile. A failure stays on that row until its next try, so a refresh never hides it.
+ */
+async function onAck(id) {
+  if (inFlight.has(id) || acked.has(id)) return;
+  const button = ackButtonOf(id);
+  // Read focus before disabling: a disabled button drops it to the page.
+  const hadFocus = button !== null && document.activeElement === button;
+  // Give focus back only if it is still where the disabled button dropped it: once on-call has moved on to
+  // another row, pulling focus back would send their next Enter to this incident.
+  const focusStillDropped = () => hadFocus && (document.activeElement === null || document.activeElement === document.body);
+  inFlight.add(id);
+  if (button) setAckState(button, 'inFlight');
+  const error = rows.get(id)?.querySelector('.ack-error');
+  if (error) error.hidden = true;
   try {
     const reply = await ack(id);
     acked.set(id, reply);
-    const mark = ackedMark(reply);
-    button.replaceWith(mark);
-    if (hadFocus) mark.focus();
+    const current = ackButtonOf(id);
+    if (current) {
+      const mark = ackedMark(reply);
+      current.replaceWith(mark);
+      if (focusStillDropped()) mark.focus();
+    }
   } catch (err) {
-    button.disabled = false;
-    button.textContent = 'Ack';
-    rowError.textContent = `Ack failed: ${err.message}`;
-    rowError.hidden = false;
-    if (hadFocus) button.focus();
+    const current = ackButtonOf(id);
+    if (current) {
+      setAckState(current, listed.has(id) ? 'open' : 'gone');
+      if (focusStillDropped()) current.focus();
+    }
+    const rowError = rows.get(id)?.querySelector('.ack-error');
+    if (rowError) {
+      rowError.textContent = `Ack failed: ${err.message}`;
+      rowError.hidden = false;
+    }
+  } finally {
+    inFlight.delete(id);
   }
+}
+
+/**
+ * A row whose incident left the API's list stays put until the bar (R1) but can no longer be acked; it comes
+ * back to life if the incident returns. Every such row is marked, acked or not; an ack in flight is left alone.
+ */
+function markGone(row, gone) {
+  row.classList.toggle('gone', gone);
+  const button = row.querySelector('[data-testid="ack"]');
+  if (!button || inFlight.has(row.dataset.id)) return;
+  setAckState(button, gone ? 'gone' : 'open');
 }
 
 /** Sets a value only when it differs, so an unchanged refresh makes no DOM mutation (no live-region noise). */
@@ -60,7 +104,9 @@ function set(node, key, value) {
 function fill(row, i) {
   set(row, 'className', `row ${i.severity}`);
   set(row.querySelector('.sev'), 'textContent', i.severity);
-  set(row.querySelector('.what'), 'textContent', `${i.service} · ${i.region} · ${i.summary}`);
+  const what = `${i.service} · ${i.region} · ${i.summary}`;
+  set(row.querySelector('.what'), 'textContent', what);
+  set(row.querySelector('.what'), 'title', what);
   const time = row.querySelector('time');
   set(time, 'dateTime', i.openedAt);
   set(time, 'title', i.openedAt);
@@ -68,7 +114,7 @@ function fill(row, i) {
 }
 
 function buildRow(i) {
-  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id });
+  const row = el('li', { 'data-testid': 'incident-row', 'data-id': i.id, tabindex: '-1' });
   row.append(el('span', { class: 'id' }, i.id), el('span', { class: 'sev' }), el('span', { class: 'what' }), el('time'));
   const rowError = el('span', { class: 'ack-error', role: 'alert' });
   rowError.hidden = true;
@@ -76,7 +122,8 @@ function buildRow(i) {
     row.append(ackedMark(acked.get(i.id)));
   } else {
     const button = el('button', { type: 'button', 'data-testid': 'ack', 'aria-label': `Ack ${i.id}` }, 'Ack');
-    button.addEventListener('click', () => onAck(i.id, button, rowError));
+    if (inFlight.has(i.id)) setAckState(button, 'inFlight');
+    button.addEventListener('click', () => onAck(i.id));
     row.append(button);
   }
   row.append(rowError);
@@ -93,11 +140,11 @@ function newestFirst(incidents) {
 }
 
 /**
- * Puts the list in the given order, reusing existing rows so acks and focus survive a refresh.
- * Every answer from the API is the whole current list, `since` included (measured 2026-11-12), so a row
- * missing from it is gone.
+ * Puts the whole list in order, reusing existing rows so acks and focus survive. Used on first load and when
+ * on-call clicks the "N new" bar. Every answer from the API is the whole current list, `since` included
+ * (measured 2026-11-12), so a row missing from it is gone.
  */
-export function render(incidents) {
+function apply(incidents) {
   const ordered = newestFirst(incidents);
   const keep = new Set(ordered.map((i) => i.id));
   for (const [id, row] of rows) {
@@ -119,9 +166,49 @@ export function render(incidents) {
     before = row.nextElementSibling;
   }
   empty.hidden = ordered.length > 0;
+  pending = null;
+  newBar.hidden = true;
 }
 
+/** The latest list while it differs from the one on screen; the bar applies it. */
+let pending = null;
+/** Set after the first successful load; until then a refresh draws the whole list. */
 let loaded = false;
+
+/**
+ * Product's decision (2026-11-12): the list holds still while it is on screen. A refresh only rewrites the
+ * rows already shown; new incidents wait behind the "N new" bar (and a gone row stays until then), so no
+ * row moves under a pointer between aim and click.
+ */
+export function render(incidents) {
+  listed = new Set(incidents.map((i) => i.id));
+  if (!loaded) return apply(incidents);
+  const latest = listed;
+  const fresh = incidents.filter((i) => !rows.has(i.id)).length;
+  const gone = [...rows.keys()].filter((id) => !latest.has(id)).length;
+  for (const i of incidents) {
+    if (!rows.has(i.id)) continue;
+    fill(rows.get(i.id), i);
+    markGone(rows.get(i.id), false);
+  }
+  for (const [id, row] of rows) if (!latest.has(id)) markGone(row, true);
+  if (!fresh && !gone) {
+    pending = null;
+    newBar.hidden = true;
+    return;
+  }
+  pending = incidents;
+  set(newBar, 'textContent', fresh ? `${fresh} new ${fresh === 1 ? 'incident' : 'incidents'} · show` : 'list changed · show');
+  newBar.hidden = false;
+}
+
+newBar.addEventListener('click', () => {
+  if (!pending) return;
+  apply(pending);
+  // Focus the new top row itself, not its Ack: a repeated Enter on the bar must not ack anything.
+  list.firstElementChild?.focus();
+});
+
 
 function showLoadError(message) {
   error.textContent = `Could not load incidents: ${message}. Retrying.`;
