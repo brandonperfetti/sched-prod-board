@@ -1,0 +1,7 @@
+// The board as a static-assets Worker. Deploy: npm run build, then npx wrangler deploy (serves dist/).
+{
+  "name": "sched-prod-board",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "assets": { "directory": "./dist" }
+}
